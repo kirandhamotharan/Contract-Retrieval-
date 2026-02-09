@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 Semantic search over contract JSON using sentence-transformers embeddings.
-Fixed to work with array-based JSON format.
+Now with section number extraction!
 """
 
 import sys
 import json
 import pickle
-import hashlib
+import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import argparse
 
 # Check dependencies
@@ -20,6 +20,23 @@ except ImportError as e:
     print(f"Error: {e}")
     print("Install required packages: pip install sentence-transformers")
     sys.exit(1)
+
+
+def extract_section_number(text: str) -> Optional[str]:
+    """Extract section number from text (e.g., 'Section 4.2.1' or '4.2.1')."""
+    # Match patterns like "Section 4.2.1", "Section 11.13", "4.2", etc.
+    patterns = [
+        r'Section\s+(\d+(?:\.\d+)*)',  # "Section 4.2.1"
+        r'^(\d+(?:\.\d+)+)\s+[A-Z]',   # "4.2.1 Title"
+        r'^\s*(\d+(?:\.\d+)+)\s',      # "  4.2 "
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
+        if match:
+            return match.group(1)
+    
+    return None
 
 
 def load_contract(json_path: str) -> List[Dict]:
@@ -66,13 +83,17 @@ def create_embeddings(pages: List[Dict], model: SentenceTransformer, cache_path:
         
         if not text:
             continue
-            
+        
+        # Extract section number from page text
+        section = extract_section_number(text)
+        
         # Split into chunks
         text_chunks = chunk_text(text)
         
         for chunk in text_chunks:
             chunks_with_meta.append({
                 'page': page_num,
+                'section': section,
                 'text': chunk
             })
     
@@ -165,6 +186,7 @@ def search(query: str, chunks: List[Dict], embeddings: np.ndarray, model: Senten
         if page_num not in page_results or score > page_results[page_num]['score']:
             page_results[page_num] = {
                 'page': page_num,
+                'section': chunks[idx].get('section'),
                 'score': score,
                 'text': chunks[idx]['text']
             }
@@ -213,7 +235,12 @@ def interactive_search(json_path: str, model_name: str = "sentence-transformers/
                 if len(result['text']) > 200:
                     snippet += "..."
                 
-                print(f"{i}. Page {result['page']} (relevance: {score_pct:.1f}%)")
+                # Build location string
+                location = f"Page {result['page']}"
+                if result.get('section'):
+                    location += f", Section {result['section']}"
+                
+                print(f"{i}. {location} (relevance: {score_pct:.1f}%)")
                 print(f"   {snippet}")
                 print()
                 
