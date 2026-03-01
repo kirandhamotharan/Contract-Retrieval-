@@ -46,7 +46,8 @@ def load_contract(json_path: str) -> List[Dict]:
     return pages
 
 
-def chunk_text_by_paragraphs(text: str, max_chunk_size: int = 800, overlap: int = 150) -> List[str]:
+def chunk_text_by_paragraphs(text: str, max_chunk_size: int = 1200, overlap: int = 200) -> List[str]:
+    """Split text into chunks by paragraphs, keeping related content together."""
     paragraphs = re.split(r'\n\s*\n', text)
     chunks = []
     current_chunk = ""
@@ -60,8 +61,8 @@ def chunk_text_by_paragraphs(text: str, max_chunk_size: int = 800, overlap: int 
             if current_chunk:
                 chunks.append(current_chunk.strip())
                 sentences = re.split(r'[.!?]+\s+', current_chunk)
-                if len(sentences) > 1:
-                    current_chunk = '. '.join(sentences[-2:]) + '. ' + para
+                if len(sentences) > 2:
+                    current_chunk = '. '.join(sentences[-3:]) + '. ' + para
                 else:
                     current_chunk = para
             else:
