@@ -250,6 +250,21 @@ st.markdown("""
         transform: translateY(-1px);
         box-shadow: 0 4px 12px rgba(0, 102, 204, 0.35);
     }
+
+    /* ===== RESULT TOGGLE BUTTON ===== */
+    .stButton > button[kind="secondary"] {
+        background: var(--surface-gray);
+        color: var(--primary-navy);
+        border: 1px solid var(--border-gray);
+        padding: 0.75rem 1rem;
+        font-size: 0.85rem;
+    }
+
+    .stButton > button[kind="secondary"]:hover {
+        background: var(--light-blue);
+        border-color: var(--primary-blue);
+        color: var(--primary-blue);
+    }
     
     /* ===== FILE UPLOADER ===== */
     .stFileUploader {
@@ -269,29 +284,33 @@ st.markdown("""
         font-weight: 500 !important;
         color: var(--text-primary) !important;
     }
-    
-    /* ===== EXPANDERS (RESULTS) ===== */
-    .streamlit-expanderHeader {
-        font-family: 'IBM Plex Sans', sans-serif !important;
-        font-weight: 500;
+
+    /* ===== RESULT HEADER ROW ===== */
+    .result-header-bar {
         background: var(--surface-gray);
-        border-radius: 8px;
-        padding: 1rem 1.25rem !important;
         border: 1px solid var(--border-gray);
-        transition: all 0.2s ease;
+        border-radius: 8px;
+        padding: 1rem 1.25rem;
+        font-weight: 500;
+        color: var(--primary-navy);
+        font-size: 0.95rem;
+        display: flex;
+        align-items: center;
     }
-    
-    .streamlit-expanderHeader:hover {
+
+    .result-header-bar:hover {
         background: var(--light-blue);
         border-color: var(--primary-blue);
     }
-    
-    .streamlit-expanderContent {
+
+    /* ===== RESULT CONTENT PANEL ===== */
+    .result-content-panel {
         background: var(--surface-white);
         border: 1px solid var(--border-gray);
         border-top: none;
         border-radius: 0 0 8px 8px;
         padding: 1.25rem;
+        margin-bottom: 0.5rem;
     }
     
     /* ===== RELEVANCE SCORE BADGE ===== */
@@ -319,35 +338,7 @@ st.markdown("""
         color: #6b7280;
     }
     
-    /* ===== RESULT CARD ===== */
-    .result-card {
-        background: var(--surface-white);
-        border: 1px solid var(--border-gray);
-        border-radius: 10px;
-        padding: 1.25rem;
-        margin-bottom: 1rem;
-        border-left: 4px solid var(--primary-blue);
-        transition: all 0.2s ease;
-    }
-    
-    .result-card:hover {
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-        transform: translateX(2px);
-    }
-    
-    .result-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 0.75rem;
-    }
-    
-    .result-location {
-        font-weight: 600;
-        color: var(--primary-navy);
-        font-size: 0.95rem;
-    }
-    
+    /* ===== RESULT TEXT ===== */
     .result-text {
         background: var(--surface-gray);
         padding: 1rem;
@@ -634,49 +625,56 @@ with col_search:
                     <p style="margin: 0 0 1rem 0; color: var(--text-secondary);">
                         Found <strong>{len(results)}</strong> relevant sections matching your query
                     </p>
+                </div>
                 """, unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
                 
                 for i, result in enumerate(results, 1):
                     score_pct = result['score'] * 100
                     page_num = result['page']
                     relevance_class = get_relevance_class(result['score'])
-                    
+
                     location = f"Page {page_num}"
                     if result.get('section'):
                         location += f" · Section {result['section']}"
-                    
-                    with st.expander(
-                        f"**Result {i}** — {location} — Relevance: {score_pct:.0f}%",
-                        expanded=(i <= 2)
-                    ):
-                        st.markdown(f"**Extracted Content:**")
-                        
-                        display_text = result['text'][:600]
-                        st.markdown(f"""
-                        <div class="result-text">{display_text}{'...' if len(result['text']) > 600 else ''}</div>
-                        """, unsafe_allow_html=True)
-                        
-                        if len(result['text']) > 600:
-                            st.caption("Content truncated for display")
-                        
-                        st.markdown("<div style='height: 0.75rem'></div>", unsafe_allow_html=True)
-                        
-                        show_full = st.checkbox(
-                            f"View complete Page {page_num}",
-                            key=f"show_{i}"
+
+                    # Result header bar
+                    st.markdown(f"""
+                    <div class="result-header-bar">
+                        <strong>Result {i}</strong>&nbsp;&nbsp;—&nbsp;&nbsp;{location}&nbsp;&nbsp;—&nbsp;&nbsp;Relevance:&nbsp;{score_pct:.0f}%
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Result content — always visible
+                    st.markdown("**Extracted Content:**")
+
+                    display_text = result['text'][:600]
+                    st.markdown(f"""
+                    <div class="result-text">{display_text}{'...' if len(result['text']) > 600 else ''}</div>
+                    """, unsafe_allow_html=True)
+
+                    if len(result['text']) > 600:
+                        st.caption("Content truncated for display")
+
+                    st.markdown("<div style='height: 0.75rem'></div>", unsafe_allow_html=True)
+
+                    show_full = st.checkbox(
+                        f"View complete Page {page_num}",
+                        key=f"show_{i}"
+                    )
+
+                    if show_full:
+                        st.markdown(f"**Complete Page {page_num} Content:**")
+                        full_text = contract_pages.get(page_num, "Page content unavailable")
+                        st.text_area(
+                            "Full page content",
+                            full_text,
+                            height=350,
+                            key=f"full_{i}",
+                            label_visibility="collapsed"
                         )
-                        
-                        if show_full:
-                            st.markdown(f"**Complete Page {page_num} Content:**")
-                            full_text = contract_pages.get(page_num, "Page content unavailable")
-                            st.text_area(
-                                "Full page content",
-                                full_text,
-                                height=350,
-                                key=f"full_{i}",
-                                label_visibility="collapsed"
-                            )
+
+                    st.markdown("<div style='height: 1rem'></div>", unsafe_allow_html=True)
+
             else:
                 st.markdown("""
                 <div class="content-card">
