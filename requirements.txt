@@ -1,5 +1,7 @@
 streamlit
 sentence-transformers==3.0.0
 PyPDF2
+PyMuPDF
+rank_bm25
 torch
 numpy<2

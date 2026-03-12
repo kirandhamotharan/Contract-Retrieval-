@@ -1,9 +1,12 @@
 import streamlit as st
 import json
 import html
+import io
+import re
 from pathlib import Path
 from semantic_search_fixed import load_or_create_embeddings, search, load_contract
 import PyPDF2
+import fitz  # PyMuPDF
 import tempfile
 import numpy as np
 
@@ -420,6 +423,8 @@ if 'search_results' not in st.session_state:
     st.session_state.search_results = None
 if 'last_query' not in st.session_state:
     st.session_state.last_query = ""
+if 'pdf_files' not in st.session_state:
+    st.session_state.pdf_files = {}  # doc_name -> pdf bytes
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -446,6 +451,80 @@ def extract_pdf_to_json(pdf_file):
     except Exception as e:
         st.error(f"Document processing error: {e}")
         return None
+
+def render_pdf_page_highlighted(pdf_bytes, page_num, matched_text):
+    """Render a PDF page as an image with the full matched clause highlighted in yellow."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    if page_num < 1 or page_num > len(doc):
+        st.warning(f"Page {page_num} not found in document.")
+        doc.close()
+        return
+
+    page = doc[page_num - 1]  # 0-indexed
+
+    # Break the matched text into overlapping word chunks and highlight every one.
+    # This ensures the ENTIRE retrieved clause gets highlighted, not just a fragment.
+    search_text = matched_text.strip()
+    words = search_text.split()
+    highlighted = False
+    chunk_size = 6  # words per search chunk
+    step = 4        # overlap by 2 words to avoid gaps
+
+    for j in range(0, len(words), step):
+        snippet = ' '.join(words[j:j + chunk_size])
+        if len(snippet) < 10:
+            continue
+        rects = page.search_for(snippet)
+        for rect in rects:
+            highlight = page.add_highlight_annot(rect)
+            highlight.set_colors(stroke=(1, 0.95, 0))  # yellow
+            highlight.update()
+            highlighted = True
+
+    # Render page to image at 2x zoom for crisp display
+    mat = fitz.Matrix(2, 2)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    img_bytes = pix.tobytes("png")
+    doc.close()
+
+    st.image(img_bytes, use_container_width=True)
+    if highlighted:
+        st.markdown("""
+        <p style="margin: 0.25rem 0 0 0; font-size: 0.8rem; color: var(--text-muted);">
+            <span style="background: #fef08a; padding: 1px 6px; border-radius: 2px; font-size: 0.75rem;">
+                Highlighted
+            </span> = matched clause
+        </p>
+        """, unsafe_allow_html=True)
+
+
+def render_page_text_fallback(full_text, matched_text):
+    """Fallback: render full page text with HTML highlight when no PDF is available."""
+    escaped_full = html.escape(full_text)
+    escaped_match = html.escape(matched_text.strip())
+
+    match_words = escaped_match.split()
+    if len(match_words) > 5:
+        pattern = r'\s+'.join(re.escape(w) for w in match_words)
+        match = re.search(pattern, escaped_full, re.IGNORECASE | re.DOTALL)
+        if match:
+            start, end = match.span()
+            escaped_full = (
+                escaped_full[:start]
+                + '<mark style="background: #fef08a; padding: 2px 4px; border-radius: 3px;">'
+                + escaped_full[start:end]
+                + '</mark>'
+                + escaped_full[end:]
+            )
+
+    escaped_full = escaped_full.replace('\n', '<br>')
+    st.markdown(f"""
+    <div style="background: var(--surface-white); border: 1px solid var(--border-gray);
+                border-radius: 8px; padding: 1.5rem; max-height: 500px; overflow-y: auto;
+                font-size: 0.9rem; line-height: 1.7; color: var(--text-secondary);">
+        {escaped_full}
+    </div>
+    """, unsafe_allow_html=True)
 
 def get_relevance_class(score):
     """Return CSS class based on relevance score."""
@@ -504,6 +583,9 @@ if uploaded_files:
 
         if file_ext == 'pdf':
             with st.spinner(f"Processing {uploaded_file.name}..."):
+                pdf_bytes = uploaded_file.read()
+                st.session_state.pdf_files[uploaded_file.name] = pdf_bytes
+                uploaded_file.seek(0)
                 contract_data = extract_pdf_to_json(uploaded_file)
 
                 if contract_data:
@@ -543,11 +625,15 @@ if uploaded_files:
 
 elif use_default:
     default_path = "DMS-2122-027CGroupDentalContract(Ameritas)_extracted.json"
+    default_pdf = "DMS-2122-027CGroupDentalContract(Ameritas).pdf"
     if Path(default_path).exists():
         processed_docs.append({
             'name': 'Ameritas Dental Contract',
             'path': default_path
         })
+        # Load the source PDF for page rendering
+        if Path(default_pdf).exists() and 'Ameritas Dental Contract' not in st.session_state.pdf_files:
+            st.session_state.pdf_files['Ameritas Dental Contract'] = Path(default_pdf).read_bytes()
         with col_status:
             st.markdown("""
             <div class="content-card" style="margin-top: 0;">
@@ -567,20 +653,21 @@ if processed_docs:
     st.markdown("""
     <div class="content-card">
         <div class="section-title">
-            Semantic Search
+            Hybrid Search
         </div>
     </div>
     """, unsafe_allow_html=True)
 
     @st.cache_resource
     def load_multi_docs(doc_list):
-        """Load and combine embeddings from multiple documents."""
+        """Load and combine embeddings + BM25 index from multiple documents."""
         all_chunks = []
         all_embeddings = []
+        all_tokenized = []
         model = None
 
         for doc in doc_list:
-            chunks, embeddings, model = load_or_create_embeddings(doc['path'], "BAAI/bge-base-en-v1.5")
+            chunks, embeddings, model, bm25 = load_or_create_embeddings(doc['path'], "BAAI/bge-base-en-v1.5")
 
             # Add document name to each chunk
             for chunk in chunks:
@@ -592,7 +679,13 @@ if processed_docs:
         # Combine all embeddings
         combined_embeddings = np.vstack(all_embeddings)
 
-        return all_chunks, combined_embeddings, model
+        # Build a combined BM25 index across all documents
+        from rank_bm25 import BM25Okapi
+        from semantic_search_fixed import tokenize_for_bm25
+        tokenized_corpus = [tokenize_for_bm25(c['text']) for c in all_chunks]
+        combined_bm25 = BM25Okapi(tokenized_corpus)
+
+        return all_chunks, combined_embeddings, model, combined_bm25
 
     @st.cache_data
     def get_all_contract_pages(doc_list):
@@ -605,7 +698,7 @@ if processed_docs:
         return all_pages
 
     with st.spinner("Initializing AI analysis engine..."):
-        chunks, embeddings, model = load_multi_docs(processed_docs)
+        chunks, embeddings, model, bm25 = load_multi_docs(processed_docs)
         contract_pages = get_all_contract_pages(processed_docs)
 
     st.markdown(f"""
@@ -647,7 +740,7 @@ if processed_docs:
         with st.spinner(f"Analyzing {len(queries)} queries across {len(processed_docs)} document(s)..."):
             all_results = []
             for q in queries:
-                results = search(q, chunks, embeddings, model, top_n)
+                results = search(q, chunks, embeddings, model, top_n, bm25=bm25)
                 all_results.append({'query': q, 'results': results})
 
             st.session_state.search_results = all_results
@@ -712,15 +805,16 @@ if processed_docs:
                     )
 
                     if show_full:
-                        st.markdown(f"**Complete Page {page_num} Content:**")
-                        full_text = contract_pages.get(page_key, "Page content unavailable")
-                        st.text_area(
-                            "Full page content",
-                            full_text,
-                            height=350,
-                            key=f"full_{query_text}_{i}",
-                            label_visibility="collapsed"
-                        )
+                        st.markdown(f"**Complete Page {page_num}:**")
+                        pdf_bytes = st.session_state.pdf_files.get(doc_name)
+                        if pdf_bytes:
+                            render_pdf_page_highlighted(pdf_bytes, page_num, result['text'])
+                        else:
+                            full_text = contract_pages.get(page_key, "")
+                            if full_text:
+                                render_page_text_fallback(full_text, result['text'])
+                            else:
+                                st.warning("Page content unavailable.")
 
                     st.markdown("<div style='height: 1rem'></div>", unsafe_allow_html=True)
 
